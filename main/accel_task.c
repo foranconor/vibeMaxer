@@ -10,12 +10,13 @@
 #define TAG "accel"
 
 // ADXL345 registers
+#define REG_DEVID       0x00
 #define REG_BW_RATE     0x2C
 #define REG_POWER_CTL   0x2D
 #define REG_DATA_FORMAT 0x31
 #define REG_DATAX0      0x32
-#define REG_FIFO_CTL    0x38
-#define REG_FIFO_STATUS 0x39
+
+#define ADXL345_DEVID   0xE5
 
 // Packet layout: magic(2) + sensor_id(1) + timestamp_ms(4) + num_samples(2) + samples
 // Each sample: int16_t x, y, z = 6 bytes
@@ -23,6 +24,7 @@
 #define SAMPLE_BYTES    (ACCEL_SAMPLES_PER_POST * 6)
 #define PACKET_SIZE     (HEADER_SIZE + SAMPLE_BYTES)
 
+static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
 
 static void build_header(uint8_t *buf, uint32_t ts_ms, uint16_t n)
@@ -46,14 +48,29 @@ static esp_err_t reg_write(uint8_t reg, uint8_t val)
 
 static esp_err_t reg_read(uint8_t reg, uint8_t *buf, size_t len)
 {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, buf, len, pdMS_TO_TICKS(100));
+    esp_err_t err = i2c_master_transmit(s_dev, &reg, 1, pdMS_TO_TICKS(100));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reg 0x%02x write phase: %s", reg, esp_err_to_name(err));
+        return err;
+    }
+    err = i2c_master_receive(s_dev, buf, len, pdMS_TO_TICKS(100));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reg 0x%02x read phase (%d B): %s", reg, len, esp_err_to_name(err));
+    }
+    return err;
 }
 
 static void adxl345_init(void)
 {
-    ESP_ERROR_CHECK(reg_write(REG_BW_RATE,     0x0D)); // 800 Hz output rate
+    uint8_t devid = 0;
+    if (reg_read(REG_DEVID, &devid, 1) != ESP_OK || devid != ADXL345_DEVID) {
+        ESP_LOGE(TAG, "ADXL345 not found (devid=0x%02x, expected 0x%02x)", devid, ADXL345_DEVID);
+    } else {
+        ESP_LOGI(TAG, "ADXL345 ok");
+    }
+
+    ESP_ERROR_CHECK(reg_write(REG_BW_RATE,     0x0C)); // 400 Hz output rate
     ESP_ERROR_CHECK(reg_write(REG_DATA_FORMAT, 0x0B)); // full resolution, ±16 g
-    ESP_ERROR_CHECK(reg_write(REG_FIFO_CTL,    0x80)); // stream mode
     ESP_ERROR_CHECK(reg_write(REG_POWER_CTL,   0x08)); // start measuring
 }
 
@@ -84,15 +101,14 @@ void accel_task(void *pv)
         .glitch_ignore_cnt   = 7,
         .flags.enable_internal_pullup = true,
     };
-    i2c_master_bus_handle_t bus;
-    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus));
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &s_bus));
 
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = ADXL345_I2C_ADDR,
         .scl_speed_hz    = 400000,
     };
-    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg, &s_dev));
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev));
 
     adxl345_init();
 
@@ -102,34 +118,30 @@ void accel_task(void *pv)
     uint32_t batch_ts = 0;
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(ACCEL_FIFO_DRAIN_MS));
+        vTaskDelay(pdMS_TO_TICKS(ACCEL_POLL_MS));
 
-        uint8_t fifo_status;
-        if (reg_read(REG_FIFO_STATUS, &fifo_status, 1) != ESP_OK) continue;
-        int entries = fifo_status & 0x3F;
+        if (count == 0) {
+            batch_ts = (uint32_t)(esp_timer_get_time() / 1000);
+        }
 
-        for (int i = 0; i < entries; i++) {
-            if (count == 0) {
-                batch_ts = (uint32_t)(esp_timer_get_time() / 1000);
-            }
+        uint8_t raw[6];
+        esp_err_t err = reg_read(REG_DATAX0, raw, 6);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "read failed: %s", esp_err_to_name(err));
+            i2c_master_bus_reset(s_bus);
+            continue;
+        }
 
-            uint8_t raw[6];
-            if (reg_read(REG_DATAX0, raw, 6) != ESP_OK) {
-                ESP_LOGW(TAG, "read failed");
-                continue;
-            }
+        // ADXL345 is little-endian: [X_L, X_H, Y_L, Y_H, Z_L, Z_H]
+        samples[count * 3 + 0] = (int16_t)((raw[1] << 8) | raw[0]);
+        samples[count * 3 + 1] = (int16_t)((raw[3] << 8) | raw[2]);
+        samples[count * 3 + 2] = (int16_t)((raw[5] << 8) | raw[4]);
+        count++;
 
-            // ADXL345 is little-endian: [X_L, X_H, Y_L, Y_H, Z_L, Z_H]
-            samples[count * 3 + 0] = (int16_t)((raw[1] << 8) | raw[0]);
-            samples[count * 3 + 1] = (int16_t)((raw[3] << 8) | raw[2]);
-            samples[count * 3 + 2] = (int16_t)((raw[5] << 8) | raw[4]);
-            count++;
-
-            if (count >= ACCEL_SAMPLES_PER_POST) {
-                build_header(packet, batch_ts, ACCEL_SAMPLES_PER_POST);
-                http_post(packet, PACKET_SIZE);
-                count = 0;
-            }
+        if (count >= ACCEL_SAMPLES_PER_POST) {
+            build_header(packet, batch_ts, ACCEL_SAMPLES_PER_POST);
+            http_post(packet, PACKET_SIZE);
+            count = 0;
         }
     }
 }

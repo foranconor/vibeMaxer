@@ -18,10 +18,10 @@
 #define PACKET_MAGIC_1 0xCD
 #define SENSOR_ID_ACCEL 0x02
 
-// Accel: 800 Hz via FIFO, 800 samples per POST (1 s batches)
-#define ACCEL_SAMPLE_RATE_HZ 800
-#define ACCEL_SAMPLES_PER_POST 800
-#define ACCEL_FIFO_DRAIN_MS 20
+// Accel: 200 Hz polling, 200 samples per POST (1 s batches)
+#define ACCEL_SAMPLE_RATE_HZ 200
+#define ACCEL_SAMPLES_PER_POST 200
+#define ACCEL_POLL_MS 5
 
 // Work hours (local time, 24-hour)
 #define WORK_HOUR_START 8
