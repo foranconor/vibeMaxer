@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -14,12 +17,22 @@ const (
 	magic1      = 0xCD
 	sensorAccel = 0x02
 	headerSize  = 9
-	listenAddr  = ":8080"
+	listenAddr  = ":7788"
 )
 
 func main() {
-	// PostgreSQL is optional — set DATABASE_URL to enable.
-	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("no .env file found, using environment")
+	}
+
+	host := os.Getenv("DB_HOST")
+	user := os.Getenv("DB_USER")
+	name := os.Getenv("DB_NAME")
+	pass := os.Getenv("DB_PASS")
+
+	if host != "" && user != "" && name != "" {
+		dsn := fmt.Sprintf("host=%s user=%s dbname=%s password=%s sslmode=disable",
+			host, user, name, pass)
 		if err := initDB(dsn); err != nil {
 			log.Printf("postgres unavailable (%v) — running without DB", err)
 		} else {
