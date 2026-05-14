@@ -14,6 +14,8 @@
 #define REG_POWER_CTL   0x2D
 #define REG_DATA_FORMAT 0x31
 #define REG_DATAX0      0x32
+#define REG_FIFO_CTL    0x38
+#define REG_FIFO_STATUS 0x39
 
 // Packet layout: magic(2) + sensor_id(1) + timestamp_ms(4) + num_samples(2) + samples
 // Each sample: int16_t x, y, z = 6 bytes
@@ -49,16 +51,17 @@ static esp_err_t reg_read(uint8_t reg, uint8_t *buf, size_t len)
 
 static void adxl345_init(void)
 {
-    ESP_ERROR_CHECK(reg_write(REG_BW_RATE,     0x0A)); // 100 Hz output rate
+    ESP_ERROR_CHECK(reg_write(REG_BW_RATE,     0x0D)); // 800 Hz output rate
     ESP_ERROR_CHECK(reg_write(REG_DATA_FORMAT, 0x0B)); // full resolution, ±16 g
+    ESP_ERROR_CHECK(reg_write(REG_FIFO_CTL,    0x80)); // stream mode
     ESP_ERROR_CHECK(reg_write(REG_POWER_CTL,   0x08)); // start measuring
 }
 
 static void http_post(const uint8_t *data, size_t len)
 {
     esp_http_client_config_t cfg = {
-        .url                = SERVER_URL,
-        .method             = HTTP_METHOD_POST,
+        .url        = SERVER_URL,
+        .method     = HTTP_METHOD_POST,
         .timeout_ms = 3000,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -93,49 +96,40 @@ void accel_task(void *pv)
 
     adxl345_init();
 
-    // First-order high-pass filter — removes DC gravity component.
-    // alpha = RC / (RC + dt), RC = 1/(2*pi*fc), fc=0.5 Hz, dt=0.01 s → alpha≈0.97
-    static const float HP_ALPHA = 0.97f;
-    static float hp_x = 0.0f, hp_y = 0.0f, hp_z = 0.0f;
-    static int16_t prev_x = 0, prev_y = 0, prev_z = 0;
-
     static uint8_t packet[PACKET_SIZE];
     int16_t *samples = (int16_t *)(packet + HEADER_SIZE);
     int count = 0;
     uint32_t batch_ts = 0;
 
     while (1) {
-        if (count == 0) {
-            batch_ts = (uint32_t)(esp_timer_get_time() / 1000);
-        }
+        vTaskDelay(pdMS_TO_TICKS(ACCEL_FIFO_DRAIN_MS));
 
-        uint8_t raw[6];
-        if (reg_read(REG_DATAX0, raw, 6) == ESP_OK) {
+        uint8_t fifo_status;
+        if (reg_read(REG_FIFO_STATUS, &fifo_status, 1) != ESP_OK) continue;
+        int entries = fifo_status & 0x3F;
+
+        for (int i = 0; i < entries; i++) {
+            if (count == 0) {
+                batch_ts = (uint32_t)(esp_timer_get_time() / 1000);
+            }
+
+            uint8_t raw[6];
+            if (reg_read(REG_DATAX0, raw, 6) != ESP_OK) {
+                ESP_LOGW(TAG, "read failed");
+                continue;
+            }
+
             // ADXL345 is little-endian: [X_L, X_H, Y_L, Y_H, Z_L, Z_H]
-            int16_t rx = (int16_t)((raw[1] << 8) | raw[0]);
-            int16_t ry = (int16_t)((raw[3] << 8) | raw[2]);
-            int16_t rz = (int16_t)((raw[5] << 8) | raw[4]);
-
-            hp_x = HP_ALPHA * (hp_x + rx - prev_x);
-            hp_y = HP_ALPHA * (hp_y + ry - prev_y);
-            hp_z = HP_ALPHA * (hp_z + rz - prev_z);
-
-            prev_x = rx; prev_y = ry; prev_z = rz;
-
-            samples[count * 3 + 0] = (int16_t)hp_x;
-            samples[count * 3 + 1] = (int16_t)hp_y;
-            samples[count * 3 + 2] = (int16_t)hp_z;
+            samples[count * 3 + 0] = (int16_t)((raw[1] << 8) | raw[0]);
+            samples[count * 3 + 1] = (int16_t)((raw[3] << 8) | raw[2]);
+            samples[count * 3 + 2] = (int16_t)((raw[5] << 8) | raw[4]);
             count++;
-        } else {
-            ESP_LOGW(TAG, "read failed");
-        }
 
-        if (count >= ACCEL_SAMPLES_PER_POST) {
-            build_header(packet, batch_ts, ACCEL_SAMPLES_PER_POST);
-            http_post(packet, PACKET_SIZE);
-            count = 0;
+            if (count >= ACCEL_SAMPLES_PER_POST) {
+                build_header(packet, batch_ts, ACCEL_SAMPLES_PER_POST);
+                http_post(packet, PACKET_SIZE);
+                count = 0;
+            }
         }
-
-        vTaskDelay(pdMS_TO_TICKS(ACCEL_POLL_MS));
     }
 }

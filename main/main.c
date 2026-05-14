@@ -5,7 +5,6 @@
 #include "esp_sleep.h"
 #include "wifi.h"
 #include "time_sync.h"
-#include "mic_task.h"
 #include "accel_task.h"
 #include "config.h"
 #include <time.h>
@@ -62,7 +61,6 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "starting sensor tasks");
-    xTaskCreate(mic_task,   "mic",   12288, NULL, 5, NULL);
     xTaskCreate(accel_task, "accel", 12288, NULL, 5, NULL);
 
     // Monitor for end of work day — deep sleep until tomorrow's start.

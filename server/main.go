@@ -10,19 +10,14 @@ import (
 )
 
 const (
-	magic0     = 0xAB
-	magic1     = 0xCD
-	sensorMic  = 0x01
+	magic0      = 0xAB
+	magic1      = 0xCD
 	sensorAccel = 0x02
-	headerSize = 9
-	listenAddr = ":8080"
+	headerSize  = 9
+	listenAddr  = ":8080"
 )
 
 func main() {
-	if err := os.MkdirAll("data/audio", 0755); err != nil {
-		log.Fatal(err)
-	}
-
 	// PostgreSQL is optional — set DATABASE_URL to enable.
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		if err := initDB(dsn); err != nil {
@@ -30,10 +25,6 @@ func main() {
 		} else {
 			log.Printf("postgres connected")
 		}
-	}
-
-	if err := initAudio(); err != nil {
-		log.Fatalf("init audio: %v", err)
 	}
 
 	http.HandleFunc("/data", handleData)
@@ -73,9 +64,6 @@ func handleData(w http.ResponseWriter, r *http.Request) {
 	now       := time.Now()
 
 	switch sensorID {
-	case sensorMic:
-		log.Printf("mic   device_ts=%dms  samples=%d  payload=%d B", deviceTsMs, nSamples, len(payload))
-		handleMicPayload(payload, nSamples, now)
 	case sensorAccel:
 		log.Printf("accel device_ts=%dms  samples=%d  payload=%d B", deviceTsMs, nSamples, len(payload))
 		handleAccelPayload(payload, nSamples, deviceTsMs, now)

@@ -19,34 +19,17 @@ func initDB(dsn string) error {
 	return db.Ping()
 }
 
-func dbInsertAccel(ts time.Time, deviceTsMs uint32, rms, peak, domHz float64) {
+func dbInsertAccel(ts time.Time, deviceTsMs uint32, nSamples int, raw []byte) {
 	if db == nil {
 		return
 	}
 	_, err := db.Exec(
-		`INSERT INTO accel_batches (ts, device_ts_ms, rms_ms2, peak_ms2, dom_hz)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		ts, int(deviceTsMs), rms, peak, domHz,
+		`INSERT INTO accel_batches (ts, device_ts_ms, num_samples, raw_data)
+		 VALUES ($1, $2, $3, $4)`,
+		ts, int(deviceTsMs), nSamples, raw,
 	)
 	if err != nil {
 		log.Printf("db accel: %v", err)
 	}
 }
 
-func dbInsertAudioClip(startedAt time.Time, durationMs int, opusPath, rawPath string) {
-	if db == nil {
-		return
-	}
-	var rp *string
-	if rawPath != "" {
-		rp = &rawPath
-	}
-	_, err := db.Exec(
-		`INSERT INTO audio_clips (started_at, duration_ms, opus_path, raw_path)
-		 VALUES ($1, $2, $3, $4)`,
-		startedAt, durationMs, opusPath, rp,
-	)
-	if err != nil {
-		log.Printf("db audio: %v", err)
-	}
-}
